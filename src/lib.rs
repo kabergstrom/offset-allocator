@@ -479,6 +479,41 @@ where
         );
     }
 
+    /// Frees the allocation at the given data offset by scanning nodes.
+    ///
+    /// This is useful when you only stored the offset (not the full
+    /// [`Allocation`]) and need to free it later.  The scan is O(max_allocs)
+    /// which is acceptable for bounded pools (e.g. 1 024 descriptors or
+    /// 64 K mesh heap entries).
+    ///
+    /// # Panics
+    ///
+    /// Panics if no used node with the given `data_offset` exists (same
+    /// contract as [`free`](Self::free) on double-free).
+    pub fn free_by_offset(&mut self, data_offset: u32) {
+        for i in 0..self.nodes.len() {
+            let node = &self.nodes[i];
+            if node.data_offset == data_offset && node.used {
+                let metadata = NI::NonMax::try_from(NI::from_u32(i as u32)).unwrap_or_default();
+                let allocation = Allocation {
+                    offset: NI::from_u32(data_offset),
+                    metadata,
+                };
+                self.free(allocation);
+                return;
+            }
+        }
+        panic!(
+            "free_by_offset: no used node with data_offset={}",
+            data_offset
+        );
+    }
+
+    /// Returns an iterator over data offsets that are currently in use.
+    pub fn used_data_offsets(&self) -> impl Iterator<Item = u32> + '_ {
+        self.nodes.iter().filter(|n| n.used).map(|n| n.data_offset)
+    }
+
     /// Returns the *used* size of an allocation.
     ///
     /// Note that this may be larger than the size requested at allocation time,
