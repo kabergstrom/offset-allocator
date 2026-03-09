@@ -69,6 +69,8 @@ where
     nodes: Vec<Node<NI>>,
     free_nodes: Vec<NI::NonMax>,
     free_offset: u32,
+
+    used_head: Option<NI::NonMax>,
 }
 
 /// A single allocation.
@@ -163,6 +165,7 @@ where
             bin_indices: [None; NUM_LEAF_BINS],
             nodes: vec![],
             free_nodes: vec![],
+            used_head: None,
         };
         this.reset();
         this
@@ -178,6 +181,7 @@ where
 
         self.bin_indices.iter_mut().for_each(|index| *index = None);
 
+        self.used_head = None;
         self.nodes = vec![Node::default(); self.max_allocs as usize];
 
         // Freelist is a stack. Nodes in inverse order so that [0] pops first.
@@ -249,6 +253,14 @@ where
         if let Some(bin_list_next) = node.bin_list_next {
             self.nodes[bin_list_next.to_usize()].bin_list_prev = None;
         }
+        // Insert into used list
+        self.nodes[node_index.to_usize()].bin_list_prev = None;
+        self.nodes[node_index.to_usize()].bin_list_next = self.used_head;
+        if let Some(old_head) = self.used_head {
+            self.nodes[old_head.to_usize()].bin_list_prev = Some(node_index);
+        }
+        self.used_head = Some(node_index);
+
         self.free_storage -= node_total_size;
         debug!(
             "Free storage: {} (-{}) (allocate)",
@@ -315,6 +327,21 @@ where
 
         // Double delete check
         assert!(used);
+
+        // Remove from used list
+        {
+            let node = &self.nodes[node_index.to_usize()];
+            let prev = node.bin_list_prev;
+            let next = node.bin_list_next;
+            if let Some(prev) = prev {
+                self.nodes[prev.to_usize()].bin_list_next = next;
+            } else {
+                self.used_head = next;
+            }
+            if let Some(next) = next {
+                self.nodes[next.to_usize()].bin_list_prev = prev;
+            }
+        }
 
         if let Some(neighbor_prev) = self.nodes[node_index.to_usize()].neighbor_prev {
             if !self.nodes[neighbor_prev.to_usize()].used {
@@ -485,11 +512,15 @@ where
     /// for O(1) deallocation, unlike the removed `free_by_offset` which required
     /// an O(n) node scan.
     pub fn used_allocations(&self) -> impl Iterator<Item = Allocation<NI>> + '_ {
-        self.nodes.iter().enumerate().filter(|(_, n)| n.used).map(|(i, n)| {
-            Allocation {
-                offset: NI::from_u32(n.data_offset),
-                metadata: NI::NonMax::try_from(NI::from_u32(i as u32)).unwrap_or_default(),
-            }
+        let mut current = self.used_head;
+        std::iter::from_fn(move || {
+            let idx = current?;
+            let node = &self.nodes[idx.to_usize()];
+            current = node.bin_list_next;
+            Some(Allocation {
+                offset: NI::from_u32(node.data_offset),
+                metadata: idx,
+            })
         })
     }
 
